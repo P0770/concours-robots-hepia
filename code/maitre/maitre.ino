@@ -1,3 +1,4 @@
+// ===================== CODE MAÎTRE =====================
 #define ENA 3
 #define ENB 5
 #define IN1 9
@@ -8,7 +9,7 @@
 #define G2 7
 #define BOUTON_STOP 22
 #define CAPTEUR_VIDE 23
-#define BT_CONNECTED 24
+#define BT_STATE 24
 
 #define ENA2 44
 #define ENB2 53
@@ -17,11 +18,11 @@
 #define IN32 50
 #define IN42 52
 
+
 const unsigned long dureeBipSlave = 2000;
 const unsigned long dureeRoueMax = 3000;
-const unsigned long dureePont = 1500;
+const unsigned long dureePont = 3600;
 const unsigned long dureePompe = 3000;
-const unsigned long bluetoothTimeout = 5000;
 
 int etat = 0;
 int etatmem = -1;
@@ -41,17 +42,8 @@ bool pontActive = false;
 unsigned long pompeStartTime = 0;
 bool pompeActive = false;
 
-unsigned long bluetoothPerteTime = 0;
 bool capteurVideEtatPrecedent = HIGH;
 
-void eteindreTousMoteurs() {
-  analogWrite(ENA, 0);
-  analogWrite(ENB, 0);
-  analogWrite(ENA2, 0);
-  analogWrite(ENB2, 0);
-  analogWrite(G1, 0);
-  digitalWrite(G2, LOW);
-}
 
 void resetSystem() {
   etat = 0;
@@ -61,9 +53,11 @@ void resetSystem() {
   attenteDeuxBips = false;
   deuxBipsFait = false;
   etatmem = -1;
-  bluetoothPerteTime = 0;
-  eteindreTousMoteurs();
+  MoteursMise0();
 }
+
+
+
 
 void setup() {
   Serial.begin(9600);
@@ -87,31 +81,17 @@ void setup() {
 
   pinMode(BOUTON_STOP, INPUT_PULLUP);
   pinMode(CAPTEUR_VIDE, INPUT_PULLUP);
-  pinMode(BT_CONNECTED, INPUT);
+  pinMode(BT_STATE, INPUT);
 
   digitalWrite(G2, LOW);
   analogWrite(G1, 0);
-  eteindreTousMoteurs();
+  MoteursMise0();
 }
 
 void loop() {
   unsigned long now = millis();
-  bool btOk = (digitalRead(BT_CONNECTED) == HIGH);
-
-  if (digitalRead(BOUTON_STOP) == LOW) {
-    Serial.println("==> ARRÊT D'URGENCE manuel");
-    resetSystem();
-    return;
-  }
-
-  if (!btOk) {
-    if (bluetoothPerteTime == 0) bluetoothPerteTime = now;
-    else if (now - bluetoothPerteTime >= bluetoothTimeout && etat != 0) {
-      Serial.println("==> PERTE BLUETOOTH > 5 sec : retour à l'état 0");
-      resetSystem();
-      return;
-    }
-  } else bluetoothPerteTime = 0;
+  BTCheckARRET();
+  verifierMessagesSlave();
 
   if (etat != etatmem) {
     Serial.print("==> Passage à l'état ");
@@ -122,35 +102,22 @@ void loop() {
     attenteAck = false;
     attenteDeuxBips = false;
     deuxBipsFait = false;
-    eteindreTousMoteurs();
+    MoteursMise0();
   }
 
   switch (etat) {
-    case 0:
-      if (!actionEtatFait) {
-        eteindreTousMoteurs();
-        Serial.println("État 0 : Système à zéro.");
-        actionEtatFait = true;
-      }
-      if (btOk) {
+
+    case 0:  // STOP et Attente
+      if (!actionEtatFait) Etat0();
+      if (digitalRead(BT_STATE) == HIGH) {
         Serial.println("Bluetooth connecté. Tapez 1 pour démarrer.");
         pretPourSuivant = true;
       } else pretPourSuivant = false;
       break;
 
-    case 1:
-      if (!actionEtatFait) {
-        Serial.println("État 1 : Roues AV");
-        digitalWrite(IN3, LOW);
-        digitalWrite(IN4, HIGH);
-        digitalWrite(IN1, HIGH);
-        digitalWrite(IN2, LOW);
-        analogWrite(ENA, 255);
-        analogWrite(ENB, 255);
-        roueStartTime = now;
-        roueActive = true;
-        actionEtatFait = true;
-      } else if (roueActive && !phaseRalentie && now - roueStartTime >= dureeRoueMax) {
+    case 1:  // moteur Maitre +
+      if (!actionEtatFait) Etat1(now);
+      else if (roueActive && !phaseRalentie && now - roueStartTime >= dureeRoueMax) {
         analogWrite(ENA, 128);
         analogWrite(ENB, 128);
         Serial.println("Phase ralentie...");
@@ -168,16 +135,9 @@ void loop() {
       }
       break;
 
-    case 2:
-      if (!actionEtatFait) {
-        Serial.println("État 2 : Pont");
-        digitalWrite(IN12, LOW);
-        digitalWrite(IN22, HIGH);
-        analogWrite(ENA2, 100);
-        pontStartTime = now;
-        pontActive = true;
-        actionEtatFait = true;
-      } else if (pontActive && now - pontStartTime >= dureePont) {
+    case 2:  // Pont
+      if (!actionEtatFait) Etat2(now);
+      else if (pontActive && now - pontStartTime >= dureePont) {
         digitalWrite(IN12, LOW);
         digitalWrite(IN22, HIGH);
         analogWrite(ENA2, 0);
@@ -187,68 +147,42 @@ void loop() {
       }
       break;
 
-    case 3:
-      if (!actionEtatFait) {
-        Serial.println("État 3 : Long bip slave");
-        Serial1.print("BIP2S:");
-        Serial1.println(dureeBipSlave);
-        attenteAck = true;
-        actionEtatFait = true;
-      }
+    case 3:  // Slave Moteur +
+      if (!actionEtatFait) Etat3();
       if (attenteAck && Serial1.available()) {
         String ack = Serial1.readStringUntil('\n');
         ack.trim();
         if (ack == "OK") {
-          Serial.println("Bip terminé. Tapez 1 pour 2 bips supplémentaires.");
+          Serial.println("Bip terminé. Tapez 1 pour passer à l'état pompe.");
           attenteAck = false;
-          attenteDeuxBips = true;
-        }
-      }
-      if (attenteDeuxBips && deuxBipsFait && Serial1.available()) {
-        String ack = Serial1.readStringUntil('\n');
-        ack.trim();
-        if (ack == "OK") {
-          Serial.println("2 bips terminés. Passage à l'état 4.");
-          attenteDeuxBips = false;
-          deuxBipsFait = false;
-          etat = 4;
-          actionEtatFait = false;
+          pretPourSuivant = true;
         }
       }
       break;
 
-    case 4:
-      if (!actionEtatFait) {
-        Serial.println("État 4 : Pompe");
-        digitalWrite(G2, HIGH);
-        pompeStartTime = now;
-        pompeActive = true;
-        actionEtatFait = true;
-      } else if (pompeActive && now - pompeStartTime >= dureePompe) {
+    case 4:  // Pompe
+      if (!actionEtatFait) Etat4(now);
+      else if (pompeActive && now - pompeStartTime >= dureePompe) {
         digitalWrite(G2, LOW);
-        Serial.println("Pompe OFF. Tapez 0 pour revenir à l'état 0.");
+        Serial.println("Pompe OFF. Tapez 1 pour passer à l'état bip final.");
         pompeActive = false;
         pretPourSuivant = true;
       }
       break;
+
+    case 5:  // Slave Moteur -
+      if (!actionEtatFait) Etat5();
+      if (attenteDeuxBips && Serial1.available()) {
+        String ack = Serial1.readStringUntil('\n');
+        ack.trim();
+        if (ack == "OK") {
+          Serial.println("2 bips finaux terminés. Tapez 0 pour revenir à l'état 0.");
+          pretPourSuivant = true;
+          attenteDeuxBips = false;
+        }
+      }
+      break;
   }
 
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd == "1") {
-      if (attenteDeuxBips && !deuxBipsFait) {
-        Serial1.println("BIP2X");
-        Serial.println("2 bips envoyés au slave...");
-        deuxBipsFait = true;
-      } else if (pretPourSuivant) {
-        etat++;
-        actionEtatFait = false;
-        pretPourSuivant = false;
-      }
-    } else if (cmd == "0" && pretPourSuivant && etat == 4) {
-      Serial.println("Retour état 0.");
-      resetSystem();
-    }
-  }
+  InputUtilisateur();
 }

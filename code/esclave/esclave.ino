@@ -1,24 +1,33 @@
-// ===================== CALIBRAGE CENTRALISÉ SLAVE =====================
+// ===================== LIBRAIRIES & OBJETS =====================
+#include <Wire.h>
+#include <MPU6050.h>
+#include <SoftwareSerial.h>
+MPU6050 mpu;
+SoftwareSerial BT(7, 8);  // RX, TX
 
-// --- PID gyroscope ---
+// ===================== PARAMÈTRES CALIBRABLES =====================
+// PID
 const float KP_SLAVE = 4.5;
 const float KI_SLAVE = 0.0;
 const float KD_SLAVE = 1.0;
+const float alphaGyro = 0.9;  // pour filtrage exponentiel
 
-// --- Mouvement & PID ---
-const int VITESSE_SLAVE = 80;
-const unsigned long DELAI_SANS_PID = 2000;
-const unsigned long DELAI_ENVOI_ANGLE = 50;
+// Vitesse et phases de l'état 3
+const int vitessePont = 120;             // Phase 1 : passage du pont
+const int vitesseRapide = 250;           // Phase 2 : vitesse max
+const int vitesseFinale = 60;            // Phase 3 : approche lente avec détection bord
+const unsigned long dureePont = 4000;    // Durée sans détection (sur le pont)
+const unsigned long dureeRapide = 15000;  // Durée après le pont (vitesse rapide)
+
+// Recul (ETAT5)
 const unsigned long DUREE_RECUL = 3000;
+
+// Ralentissement lors du bord
 const int PAS_RALENTI_SLAVE = 10;
 const unsigned long DELAI_RALENTI_SLAVE = 100;
 
-// ===================== INCLUSIONS & OBJETS =====================
-#include <Wire.h>
-#include <MPU6050.h>
-MPU6050 mpu;
-#include <SoftwareSerial.h>
-SoftwareSerial BT(7, 8);  // RX, TX
+// Fréquence d’envoi des angles (ETAT1 uniquement)
+const unsigned long DELAI_ENVOI_ANGLE = 50;
 
 // ===================== PINS =====================
 #define ENA 3
@@ -30,30 +39,23 @@ SoftwareSerial BT(7, 8);  // RX, TX
 #define SWITCH_BORD 4
 
 // ===================== VARIABLES =====================
-unsigned long debutMouvement = 0;
-unsigned long previousTime = 0;
-unsigned long dernierEnvoi = 0;
-
-bool enPID = false;
-bool enMouvement = false;
-int etatMouvement = 0;
-bool envoyerAngles = false;
-
+float angle = 0;
 float integral = 0;
 float lastError = 0;
-float angle0 = 0;
+unsigned long previousTime = 0;
+unsigned long dernierEnvoi = 0;
+unsigned long debutMouvement = 0;
+
+bool envoyerAngles = false;
+bool enMouvement = false;
+int etatMouvement = 0;
 
 // ===================== SETUP =====================
 void setup() {
   BT.begin(9600);
-  Serial.begin(9600);
   Wire.begin();
   mpu.initialize();
-
-  while (!mpu.testConnection()) {
-    Serial.println("Erreur MPU...");
-    delay(500);
-  }
+  while (!mpu.testConnection()) delay(500);
 
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
@@ -64,107 +66,84 @@ void setup() {
   pinMode(SWITCH_BORD, INPUT_PULLUP);
 
   arretMoteurs();
-  Serial.println("SLAVE prêt !");
 }
 
 // ===================== LOOP =====================
 void loop() {
   unsigned long now = millis();
 
-  // Envoi des angles (seulement en ETAT1)
-  if (envoyerAngles && now - dernierEnvoi >= DELAI_ENVOI_ANGLE) {
-    float angle = getAngle();
-    BT.print("A:");
-    BT.println(angle);
-    dernierEnvoi = now;
-  }
-
-  // Traitement des commandes maître
+  // Réception des commandes Bluetooth
   if (BT.available()) {
     String commande = BT.readStringUntil('\n');
     commande.trim();
-    Serial.print("Reçu : ");
-    Serial.println(commande);
 
     if (commande == "ETAT1") {
-      etatMouvement = 1;
-      enMouvement = true;
       envoyerAngles = true;
-      debutMouvement = millis();
+
     } else if (commande == "STOP_ANGLE") {
       envoyerAngles = false;
-      Serial.println("→ Arrêt des envois d'angle");
+
     } else if (commande == "ETAT3") {
-      float angle = getAngle();
-      Serial.print("Angle initial : ");
-      Serial.println(angle);
       etatMouvement = 3;
       enMouvement = true;
       envoyerAngles = false;
-      enPID = false;
-      debutMouvement = millis();
-      previousTime = millis();
-      integral = 0;
-      lastError = 0;
-      angle0 = angle;
+      debutMouvement = now;
+
     } else if (commande == "ETAT5") {
       etatMouvement = 5;
       enMouvement = true;
       envoyerAngles = false;
-      debutMouvement = millis();
+      debutMouvement = now;
       reculer();
     }
   }
 
-  // Mouvement autonome avec PID (ETAT3)
-  if (enMouvement && etatMouvement == 3) {
-    if (!enPID && now - debutMouvement < DELAI_SANS_PID) {
-      avancerConstamment(VITESSE_SLAVE);
-    } else {
-      enPID = true;
-      float angle = getAngle() - angle0;
-      float dt = (now - previousTime) / 1000.0;
-      if (dt > 0) {
-        previousTime = now;
-        float error = -angle;
-        integral += error * dt;
-        float derivative = (error - lastError) / dt;
-        float correction = KP_SLAVE * error + KI_SLAVE * integral + KD_SLAVE * derivative;
-        lastError = error;
-
-        float vitesseG = constrain(VITESSE_SLAVE - correction, 0, 255);
-        float vitesseD = constrain(VITESSE_SLAVE + correction, 0, 255);
-
-        digitalWrite(IN1, HIGH);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, HIGH);
-        digitalWrite(IN4, LOW);
-        analogWrite(ENA, vitesseG);
-        analogWrite(ENB, vitesseD);
-      }
-    }
-
-    if (digitalRead(SWITCH_BORD) == LOW) {
-      ralentirEtArreter();
-      BT.println("FIN_ETAT");
-      Serial.println("→ FIN_ETAT envoyé (bord atteint)");
-      enMouvement = false;
-      etatMouvement = 0;
-    }
+  // Envoi régulier de l’angle (ETAT1)
+  if (envoyerAngles && now - dernierEnvoi >= DELAI_ENVOI_ANGLE) {
+    float taux = getTauxRotation();
+    BT.print("G:");
+    BT.println(taux);
+    dernierEnvoi = now;
   }
 
-  // Recul (ETAT5)
+  // Gestion des mouvements
+  if (enMouvement && etatMouvement == 3) {
+    gererAvanceEtat3(now);
+  }
+
   if (enMouvement && etatMouvement == 5 && now - debutMouvement >= DUREE_RECUL) {
     arretMoteurs();
     BT.println("FIN_ETAT");
-    Serial.println("→ FIN_ETAT envoyé (fin de recul)");
     enMouvement = false;
     etatMouvement = 0;
   }
 }
 
-// ===================== FONCTIONS MOTEURS =====================
+// ===================== MOUVEMENT ÉTAT 3 =====================
+void gererAvanceEtat3(unsigned long now) {
+  unsigned long t = now - debutMouvement;
+  unsigned long t1 = dureePont;
+  unsigned long t2 = t1 + dureeRapide;
 
+  if (t < t1) {
+    avancerConstamment(vitessePont);
+
+  } else if (t < t2) {
+    avancerConstamment(vitesseRapide);
+
+  } else {
+    avancerConstamment(vitesseFinale);
+
+    if (digitalRead(SWITCH_BORD) == LOW) {
+      arretMoteurs();  // 🔧 arrêt net
+      BT.println("FIN_ETAT");
+      enMouvement = false;
+      etatMouvement = 0;
+    }
+  }
+}
+
+// ===================== MOTEURS =====================
 void avancerConstamment(int vit) {
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
@@ -184,7 +163,7 @@ void reculer() {
 }
 
 void ralentirEtArreter() {
-  for (int v = VITESSE_SLAVE; v >= 0; v -= PAS_RALENTI_SLAVE) {
+  for (int v = vitesseRapide; v >= 0; v -= PAS_RALENTI_SLAVE) {
     avancerConstamment(v);
     delay(DELAI_RALENTI_SLAVE);
   }
@@ -198,11 +177,13 @@ void arretMoteurs() {
   digitalWrite(IN4, LOW);
   analogWrite(ENA, 0);
   analogWrite(ENB, 0);
+  digitalWrite(ENA, LOW);
+  digitalWrite(ENB, LOW);
 }
 
-// ===================== MPU6050 - Angle =====================
-float getAngle() {
+// ===================== MPU6050 =====================
+float getTauxRotation() {
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  return gy / 131.0;  // Angle approximatif en degrés/s
+  return gy / 131.0;  // taux de rotation en °/s
 }

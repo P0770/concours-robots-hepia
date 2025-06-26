@@ -1,37 +1,29 @@
-//CODE MASTER P2511
-//JUIN 2025
-//Mattéo Pozzo di Borgo
 
 #include <Servo.h>
 
 Servo monServo;
 
 // ===================== CONSTANTES CALIBRABLES =====================
-
-// ---------- ÉTAT 1 : Avancée avec PID ----------
-const int vitesseInitiale = 100;
 const int vitesseMax = 250;
+const int vitesseMoyenne = 150;
 const int vitesseRalentie = 60;
-const unsigned long dureePalier1 = 1500;  // palier à vitesseInitiale
-const unsigned long dureePalier2 = 6750;  // palier à vitesseMax
+const int vitesseInitiale = 100;
 
-// ---------- ÉTAT 2 : Déploiement du pont ----------
+const unsigned long dureePalier1 = 1500;
+const unsigned long dureePalier2 = 6300;
+
 const int vitessePont = 80;
 const unsigned long dureePont = 3600;
 
-// ---------- ÉTAT 3 : Mouvement du slave + activation pompe décalée ----------
-const unsigned long delaiPompeEtat3 = 10000;  // délai avant activation de la pompe
-const unsigned long dureePompeEtat3 = 7000;   // durée de la pompe
-
-// ---------- ÉTAT 4 : Activation pompe finale ----------
 const unsigned long dureePompe = 8000;
+const unsigned long prechargeDelai = 10000;
+const unsigned long prechargeDuree = 7000;
 
-// ---------- PID commun (utilisé en ÉTAT 1) ----------
-const float KP = 7.0;          // plus de réactivité (surtout à basse vitesse)
-const float KI = 0.035;        // légère augmentation pour corriger la dérive résiduelle
-const float KD = 1.8;          // plus d’amortissement, surtout utile avec plus de poids
-const float zoneMorte = 0.25;  // réduire la zone morte pour corriger les faibles écarts
-const float integralMax = 60;  // limite légèrement plus serrée pour éviter l'effet "rappel brutal"
+const float KP = 6.0;
+const float KI = 0.05;
+const float KD = 0.6;
+const float zoneMorte = 0.02;
+const float integralMax = 50;
 
 // ===================== PINS =====================
 #define ENA 3
@@ -50,6 +42,8 @@ const float integralMax = 60;  // limite légèrement plus serrée pour éviter 
 #define G2 7
 #define CAPTEUR_VIDE 4
 #define BT_STATE 24
+#define BOUTONUP 28
+#define BOUTONDOWN 29
 #define BOUTON_STOP 22
 #define BOUTON_START 17
 
@@ -70,21 +64,17 @@ bool pontActive = false;
 unsigned long pompeStartTime = 0;
 bool pompeActive = false;
 
-unsigned long pompeEtat3Start = 0;
-bool pompeEtat3Active = false;
-bool pompeEtat3Declenchee = false;
-
-unsigned long etat3StartTime = 0;
-
 bool vide = 0;
 
 int etat = 0;
 int etatmem = -1;
 bool actionEtatFait = false;
 bool attenteAck = false;
+bool pretPourSuivant = false;
 
-bool slaveLance = false;
-
+unsigned long prechargeStart = 0;
+bool prechargeActive = false;
+bool prechargeDemarree = false;
 
 void setup() {
   Serial.begin(9600);
@@ -144,7 +134,6 @@ void loop() {
       } else if (digitalRead(BOUTON_START) == LOW) {
         Serial.println("→ BOUTON_START appuyé. Passage à l'état 1");
         monServo.write(100);
-        delay(700);
         etat++;
         actionEtatFait = false;
       }
@@ -194,7 +183,8 @@ void loop() {
         pontActive = true;
         digitalWrite(IN12, HIGH);
         digitalWrite(IN22, LOW);
-        analogWrite(ENA2, vitessePont);
+        digitalWrite(ENA2, HIGH);        // Active l'alim
+        analogWrite(ENA2, vitessePont);  // Démarre le pont
         actionEtatFait = true;
       } else if (pontActive && now - pontStartTime >= dureePont) {
         Serial.println("→ Déploiement terminé. Passage à l'état 3.");
@@ -211,32 +201,11 @@ void loop() {
 
     case 3:
       if (!actionEtatFait) {
-        Serial.println("État 3 : Lancement immédiat du robot esclave");
-        Serial1.println("ETAT3\n");
+        Serial.println("État 3 : Mouvement du robot esclave");
+        Serial1.println("ETAT3");
         Serial.println("→ Ordre envoyé au SLAVE : ETAT3");
-
-        etat3StartTime = now;
         attenteAck = true;
-        slaveLance = true;
-        pompeEtat3Active = false;
-        pompeEtat3Declenchee = false;
         actionEtatFait = true;
-      }
-
-      if (!pompeEtat3Declenchee && now - etat3StartTime >= delaiPompeEtat3) {
-        Serial.println("→ Activation pompe (état 3)");
-        analogWrite(G1, 200);
-        digitalWrite(G2, HIGH);
-        pompeEtat3Start = now;
-        pompeEtat3Declenchee = true;
-        pompeEtat3Active = true;
-      }
-
-      if (pompeEtat3Active && now - pompeEtat3Start >= dureePompeEtat3) {
-        Serial.println("→ Pompe arrêtée (état 3)");
-        analogWrite(G1, 0);
-        digitalWrite(G2, LOW);
-        pompeEtat3Active = false;
       }
       break;
 
@@ -279,20 +248,9 @@ void loop() {
 
 // ===================== PID ET MOUVEMENT =====================
 void AvancerAvecPID(int vitesseCible, float angle, float dt) {
-  // Appliquer une zone morte à l'angle
-  if (abs(angle) < zoneMorte) {
-    angle = 0;
-    integral = 0;  // empêche l'intégrale de s'accumuler inutilement
-  }
-
-  // Anti-dérive douce : filtre l'angle quand gyro ≈ 0
-  if (abs(tauxRotationSlave) < 0.5) {
-    angle *= 0.98;  // l’angle revient lentement vers 0
-  }
-
+  if (abs(angle) < zoneMorte) angle = 0;
   float error = -angle;
 
-  // PID
   integral += error * dt;
   integral = constrain(integral, -integralMax, integralMax);
   float derivative = (error - lastError) / dt;
@@ -300,9 +258,7 @@ void AvancerAvecPID(int vitesseCible, float angle, float dt) {
 
   float correction = KP * error + KI * integral + KD * derivative;
   correction = constrain(correction, -60, 60);
-
-  // Zone morte sur la correction
-  if (abs(correction) < 15) correction = 0;
+  if (abs(correction) < 20) correction = (correction > 0) ? 20 : -20;
 
   float vitesseG = constrain(vitesseCible - correction, 0, 255);
   float vitesseD = constrain(vitesseCible + correction, 0, 255);
@@ -314,7 +270,6 @@ void AvancerAvecPID(int vitesseCible, float angle, float dt) {
   analogWrite(ENA, vitesseG);
   analogWrite(ENB, vitesseD);
 }
-
 
 void AvancerSansPID(int vitesseFixe) {
   digitalWrite(IN1, HIGH);
@@ -368,14 +323,11 @@ void resetSystem() {
   roueActive = false;
   pontActive = false;
   pompeActive = false;
-  pompeEtat3Active = false;
-  pompeEtat3Declenchee = false;
   integral = 0;
   lastError = 0;
   previousTime = 0;
   angleReconstruit = 0;
   tauxRotationSlave = 0;
-  slaveLance = false;
   MoteursMise0();
   digitalWrite(G2, LOW);
   digitalWrite(G1, LOW);

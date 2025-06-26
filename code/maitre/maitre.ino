@@ -1,3 +1,11 @@
+//CODE MASTER P2511
+//JUIN 2025
+//Mattéo Pozzo di Borgo
+
+#include <Servo.h>
+
+Servo monServo;
+
 // ===================== CONSTANTES CALIBRABLES =====================
 
 // ---------- ÉTAT 1 : Avancée avec PID ----------
@@ -5,25 +13,25 @@ const int vitesseInitiale = 100;
 const int vitesseMax = 250;
 const int vitesseRalentie = 60;
 const unsigned long dureePalier1 = 1500;  // palier à vitesseInitiale
-const unsigned long dureePalier2 = 6000;  // palier à vitesseMax
+const unsigned long dureePalier2 = 6750;  // palier à vitesseMax
 
 // ---------- ÉTAT 2 : Déploiement du pont ----------
 const int vitessePont = 80;
 const unsigned long dureePont = 3600;
 
 // ---------- ÉTAT 3 : Mouvement du slave + activation pompe décalée ----------
-const unsigned long delaiPompeEtat3 = 4000;  // délai avant activation de la pompe
-const unsigned long dureePompeEtat3 = 3000;  // durée de la pompe
+const unsigned long delaiPompeEtat3 = 10000;  // délai avant activation de la pompe
+const unsigned long dureePompeEtat3 = 7000;   // durée de la pompe
 
 // ---------- ÉTAT 4 : Activation pompe finale ----------
-const unsigned long dureePompe = 3000;
+const unsigned long dureePompe = 8000;
 
 // ---------- PID commun (utilisé en ÉTAT 1) ----------
-const float KP = 6.5;
-const float KI = 0.02;
-const float KD = 1.7; 
-const float zoneMorte = 0.4;
-const float integralMax = 70;
+const float KP = 7.0;          // plus de réactivité (surtout à basse vitesse)
+const float KI = 0.035;        // légère augmentation pour corriger la dérive résiduelle
+const float KD = 1.8;          // plus d’amortissement, surtout utile avec plus de poids
+const float zoneMorte = 0.25;  // réduire la zone morte pour corriger les faibles écarts
+const float integralMax = 60;  // limite légèrement plus serrée pour éviter l'effet "rappel brutal"
 
 // ===================== PINS =====================
 #define ENA 3
@@ -42,8 +50,6 @@ const float integralMax = 70;
 #define G2 7
 #define CAPTEUR_VIDE 4
 #define BT_STATE 24
-#define BOUTONUP 28
-#define BOUTONDOWN 29
 #define BOUTON_STOP 22
 #define BOUTON_START 17
 
@@ -79,9 +85,13 @@ bool attenteAck = false;
 
 bool slaveLance = false;
 
+
 void setup() {
   Serial.begin(9600);
   Serial1.begin(9600);
+
+  monServo.attach(31);
+  monServo.write(0);
 
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
@@ -129,9 +139,12 @@ void loop() {
     case 0:
       if (!actionEtatFait) {
         Serial.println("État 0 : Système à zéro. Appuyez sur START.");
+        monServo.write(0);
         actionEtatFait = true;
       } else if (digitalRead(BOUTON_START) == LOW) {
         Serial.println("→ BOUTON_START appuyé. Passage à l'état 1");
+        monServo.write(100);
+        delay(700);
         etat++;
         actionEtatFait = false;
       }
@@ -269,7 +282,7 @@ void AvancerAvecPID(int vitesseCible, float angle, float dt) {
   // Appliquer une zone morte à l'angle
   if (abs(angle) < zoneMorte) {
     angle = 0;
-    integral = 0; // empêche l'intégrale de s'accumuler inutilement
+    integral = 0;  // empêche l'intégrale de s'accumuler inutilement
   }
 
   // Anti-dérive douce : filtre l'angle quand gyro ≈ 0

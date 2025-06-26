@@ -1,3 +1,9 @@
+//CODE SLAVE P2511
+//JUIN 2025
+//Mattéo Pozzo di Borgo
+
+
+
 // ===================== LIBRAIRIES & OBJETS =====================
 #include <Wire.h>
 #include <MPU6050.h>
@@ -7,10 +13,10 @@ SoftwareSerial BT(7, 8);  // RX, TX
 
 // ===================== PARAMÈTRES CALIBRABLES =====================
 // PID
-const float KP_SLAVE = 4.5;
-const float KI_SLAVE = 0.0;
-const float KD_SLAVE = 1.0;
-const float alphaGyro = 0.9;  // pour filtrage exponentiel
+const float KP_SLAVE = 6.0;
+const float KI_SLAVE = 0.02;
+const float KD_SLAVE = 1.5;
+const float alphaGyro = 0.80;  // pour filtrage exponentiel
 
 // Vitesse et phases de l'état 3
 const int vitessePont = 120;             // Phase 1 : passage du pont
